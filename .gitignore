@@ -65,3 +65,4 @@ __MACOSX/
 *.zip
 test_entities.py
 .claude/
+docs/
