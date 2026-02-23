@@ -7,11 +7,16 @@ import pandas as pd
 import sys
 import os
 import time
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.agents.analytics_agent import AnalyticsAgent
+from src.report.explainability_ui import show_explainability_panel
 
 
 # ---- Page Config ----
@@ -62,12 +67,19 @@ st.markdown("""
 
 
 # ---- Initialize Agent (cached) ----
-@st.cache_resource
+@st.cache_resource(show_spinner=False)
 def load_agent():
-    db_path = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "data", "sample_manufacturing.db"
-    )
+    db_path = os.getenv("DATABASE_PATH")
+    if not db_path:
+        db_url = os.getenv("DATABASE_URL")
+        if db_url and db_url.startswith("sqlite:///"):
+            db_path = db_url.replace("sqlite:///", "", 1)
+
+    if not db_path:
+        db_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "data", "sample_manufacturing.db"
+        )
     return AnalyticsAgent(db_path)
 
 
@@ -119,6 +131,10 @@ def render_report(report: dict):
     st.markdown(f'<div class="report-section">{report["summary"]}</div>',
                 unsafe_allow_html=True)
 
+    if report.get("warnings"):
+        for warning in report["warnings"]:
+            st.warning(warning)
+
     # KPIs
     if report.get("kpis"):
         st.markdown("### 📊 Key Metrics")
@@ -146,8 +162,14 @@ def render_report(report: dict):
     with meta_cols[2]:
         st.markdown(f"**Timestamp:** `{report.get('timestamp', 'N/A')[:19]}`")
 
+    if report.get("db_path"):
+        st.markdown(f"**Database:** `{report['db_path']}`")
+
     with st.expander("View generated SQL", expanded=False):
         st.code(report.get("sql_query", "N/A"), language="sql")
+    
+    # Explainability Panel
+    show_explainability_panel(report)
 
 
 # ---- Main App ----
@@ -157,8 +179,9 @@ def main():
     st.markdown('<div class="sub-header">Conversational Manufacturing Analytics — Powered by DeepSeek + LangGraph</div>',
                 unsafe_allow_html=True)
 
-    # Load agent
-    agent = load_agent()
+    # Load agent with loading indicator
+    with st.spinner("🔄 Initializing AI agent... (First run: downloading models ~100MB, may take 60s)"):
+        agent = load_agent()
 
     # Chat history
     if "messages" not in st.session_state:

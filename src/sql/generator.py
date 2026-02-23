@@ -8,7 +8,7 @@ CRITICAL SQLite RULES:
 - For date arithmetic: DATE('now', '-10 days'), DATE('now', '-1 month')
 - For extracting date from datetime: DATE(column_name)
 - Dates are stored as TEXT in 'YYYY-MM-DD' format
-- Datetimes are stored as TEXT in 'YYYY-MM-DD HH:MM:SS' format
+- Datetimes are stored as TEXT in 'YYYY-MM-DD HH:MM:SS' or ISO 'YYYY-MM-DDTHH:MM:SS' format
 - Use ONLY the tables and columns provided in the schema below
 - ONLY generate SELECT statements — never INSERT, UPDATE, DELETE, DROP
 - Use proper JOINs when data spans multiple tables
@@ -25,6 +25,26 @@ COMMON COLUMN NAME MISTAKES TO AVOID:
 - shift_logs table: use 'supervisor_id' NOT 'staff_id' for the supervisor
 - production_orders table: use 'shift_id' to join with shift_logs
 - For yield: ALWAYS use (quantity_actual / quantity_planned) * 100, never SUM both then divide
+- For production_orders dates: use order_date or actual_start/actual_end if present; do NOT assume start_time
+
+EXAMPLE YIELD QUERY (for Building A vs Building B):
+SELECT 
+    lm.location,
+    AVG((po.quantity_actual / po.quantity_planned) * 100) AS average_yield
+FROM 
+    production_orders po
+JOIN 
+    line_master lm ON po.line_id = lm.line_id
+WHERE 
+    lm.location IN ('Building A', 'Building B')
+GROUP BY 
+    lm.location
+
+KEY POINTS FOR YIELD QUERIES:
+- ALWAYS use production_orders table (NOT production_steps) for quantity_actual and quantity_planned
+- To get building/location info, JOIN with line_master table
+- Use line_master.location to filter by building name
+- production_steps does NOT contain quantity data — it only tracks process steps
 
 ALIAS RULES:
 - When aliasing tables, keep it simple and consistent

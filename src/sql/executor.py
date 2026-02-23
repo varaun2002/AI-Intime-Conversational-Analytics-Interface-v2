@@ -20,8 +20,19 @@ class SQLExecutor:
             # Auto-fix common PostgreSQL syntax that LLMs generate
             sql = self._fix_sqlite_compat(sql)
 
+            statements = [s.strip() for s in sql.split(";") if s.strip()]
+
             with self.engine.connect() as conn:
-                df = pd.read_sql_query(text(sql), conn)
+                if len(statements) == 1:
+                    df = pd.read_sql_query(text(statements[0]), conn)
+                else:
+                    frames = []
+                    for idx, stmt in enumerate(statements, start=1):
+                        df_part = pd.read_sql_query(text(stmt), conn)
+                        source = self._extract_table_name(stmt) or f"query_{idx}"
+                        df_part.insert(0, "_source_table", source)
+                        frames.append(df_part)
+                    df = pd.concat(frames, ignore_index=True, sort=True)
 
             return {
                 "success": True,
@@ -75,6 +86,13 @@ class SQLExecutor:
         sql = self._fix_column_names(sql)
 
         return sql
+
+    def _extract_table_name(self, sql: str) -> str:
+        """Best-effort table name extraction for labeling multi-query results."""
+        match = re.search(r"\bFROM\s+([A-Za-z0-9_]+)", sql, flags=re.IGNORECASE)
+        if match:
+            return match.group(1)
+        return ""
 
     def _fix_column_names(self, sql: str) -> str:
         """Fix commonly hallucinated column names."""

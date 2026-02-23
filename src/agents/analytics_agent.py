@@ -5,6 +5,7 @@ Intent Classification -> Schema Retrieval -> SQL Gen+Exec -> KPI Calc -> Report 
 from typing import TypedDict, List, Optional
 from langgraph.graph import StateGraph, END
 import pandas as pd
+import os
 
 from src.llm.provider import LLMProvider
 from src.schema.extractor import extract_schema, get_schema_context
@@ -15,6 +16,12 @@ from src.sql.executor import SQLExecutor
 from src.calculations.kpi_agent import calculate_kpis
 from src.report.summarizer import SUMMARY_SYSTEM_PROMPT, build_summary_prompt
 from src.report.assembler import assemble_report
+
+# Explainability modules
+from src.explainability.query_analyzer import QueryAnalyzer
+from src.explainability.schema_explainer import SchemaExplainer
+from src.explainability.sql_explainer import SQLExplainer
+from src.explainability.kpi_explainer import KPIExplainer
 
 
 # ---- Agent State ----
@@ -34,6 +41,12 @@ class AgentState(TypedDict):
     report_summary: str
     final_report: dict
     error: str
+    # Explainability fields
+    query_analysis: dict
+    schema_explanation: dict
+    sql_explanation: dict
+    kpi_explanations: dict
+    table_scores: dict
 
 
 # ---- Intent Classification Prompt ----
@@ -58,8 +71,25 @@ class AnalyticsAgent:
         self.llm = LLMProvider()
         self.executor = SQLExecutor(db_path)
         self.schema = extract_schema(db_path)
-        self.store = SchemaStore()
+        
+        # Initialize SchemaStore with Milvus config from environment
+        milvus_host = os.getenv("MILVUS_HOST", "localhost")
+        milvus_port = os.getenv("MILVUS_PORT", "19530")
+        use_milvus = os.getenv("USE_MILVUS", "false").lower() == "true"
+        
+        self.store = SchemaStore(
+            milvus_host=milvus_host,
+            milvus_port=milvus_port,
+            use_milvus=use_milvus
+        )
         self.store.ingest(self.schema)
+        
+        # Initialize explainability modules
+        self.query_analyzer = QueryAnalyzer()
+        self.schema_explainer = SchemaExplainer()
+        self.sql_explainer = SQLExplainer()
+        self.kpi_explainer = KPIExplainer()
+        
         self.graph = self._build_graph()
 
     def _build_graph(self) -> StateGraph:
@@ -113,13 +143,63 @@ class AnalyticsAgent:
         if intent not in valid_intents:
             intent = "AGGREGATION"
 
-        return {"intent": intent, "needs_chart": needs_chart, "sql_retries": 0, "chart_retries": 0}
+        query_lower = state["query"].lower()
+        if any(word in query_lower for word in ["plot", "chart", "graph", "visualize", "visualise"]):
+            needs_chart = True
+
+        # Generate query analysis with actual LLM intent for alignment reporting
+        query_analysis = self.query_analyzer.analyze(state["query"], actual_intent=intent)
+
+        return {
+            "intent": intent,
+            "needs_chart": needs_chart,
+            "sql_retries": 0,
+            "chart_retries": 0,
+            "query_analysis": query_analysis
+        }
 
     # ---- Node 2: Schema Retriever ----
     def retrieve_schema(self, state: AgentState) -> dict:
-        tables = self.store.get_matched_table_names(state["query"], top_k=4)
+        # Get matched tables with scores
+        matches = self.store.get_matched_tables(state["query"], top_k=4)
+        
+        # Extract table names and scores
+        tables = [m["table"] for m in matches]
+        scores = {m["table"]: m["score"] for m in matches}
+
+        # Cap retrieval results BEFORE heuristics
+        if len(tables) > 6:
+            tables = tables[:6]
+
+        # Heuristics add domain-critical tables (never capped)
+        query_lower = state["query"].lower()
+        if "yield" in query_lower or "trend" in query_lower:
+            for table_name in ["production_orders", "line_master", "shift_logs", "products"]:
+                if table_name in self.schema and table_name not in tables:
+                    tables.append(table_name)
+        
+        if "cycle" in query_lower or "recipe" in query_lower:
+            for table_name in ["recipes", "production_orders", "products"]:
+                if table_name in self.schema and table_name not in tables:
+                    tables.append(table_name)
+        
+        # Get schema context
         schema_context = get_schema_context(self.schema, tables)
-        return {"relevant_tables": tables, "schema_context": schema_context}
+        
+        # Generate explanation
+        schema_explanation = self.schema_explainer.explain_selection(
+            query=state["query"],
+            selected_tables=tables,
+            scores=scores,
+            method="keyword"  # or "semantic" when Milvus is enabled
+        )
+        
+        return {
+            "relevant_tables": tables,
+            "schema_context": schema_context,
+            "schema_explanation": schema_explanation,
+            "table_scores": scores
+        }
 
     # ---- Node 3: SQL Generator + Executor ----
     def generate_sql(self, state: AgentState) -> dict:
@@ -148,10 +228,14 @@ class AnalyticsAgent:
                 "sql_retries": state.get("sql_retries", 0) + 1,
             }
 
+        # Generate SQL explanation
+        sql_explanation = self.sql_explainer.explain_query(validation["cleaned_sql"])
+
         return {
             "sql_query": validation["cleaned_sql"],
             "sql_result": result["data"],
             "error": "",
+            "sql_explanation": sql_explanation
         }
 
     # ---- SQL Router ----
@@ -166,14 +250,47 @@ class AnalyticsAgent:
     def calculate_kpis_node(self, state: AgentState) -> dict:
         df = state.get("sql_result")
         if df is None or df.empty:
-            return {"calculations": {"error": "No data available"}}
+            return {"calculations": {"error": "No data available"}, "kpi_explanations": {}}
+        
         kpis = calculate_kpis(df, state["intent"], state["query"])
-        return {"calculations": kpis}
+        
+        # Generate KPI explanations
+        kpi_explanations = {}
+        for kpi_name, kpi_value in kpis.items():
+            if isinstance(kpi_value, (int, float)):
+                kpi_explanations[kpi_name] = self.kpi_explainer.explain_kpi(
+                    kpi_name=kpi_name,
+                    value=kpi_value
+                )
+        
+        return {
+            "calculations": kpis,
+            "kpi_explanations": kpi_explanations
+        }
 
     # ---- Node 5: Report Assembler ----
     def assemble_report_node(self, state: AgentState) -> dict:
         df = state.get("sql_result")
         kpis = state.get("calculations", {})
+        warnings = []
+        if kpis.get("warning"):
+            warnings.extend(kpis.pop("warning").split(" | "))
+
+        error_text = (state.get("error") or "").lower()
+        if "no such column" in error_text:
+            warnings.append("SQL referenced a column that does not exist. This often means the schema context was incomplete or the wrong database was selected.")
+        if "no such table" in error_text:
+            warnings.append("SQL referenced a table that does not exist. Check the selected database and available tables.")
+        if "syntax error" in error_text:
+            warnings.append("SQL had a syntax error. Retrying may resolve this, or rephrase the question.")
+        if "database is locked" in error_text:
+            warnings.append("Database is locked. Try again in a few seconds or restart the app.")
+
+        if df is not None:
+            if state["intent"] == "LOOKUP" and len(df) > 50:
+                warnings.append("Query returned many rows for a lookup — results may be too broad.")
+            if state["intent"] == "TREND" and len(df) < 3:
+                warnings.append("Insufficient data points for trend analysis.")
 
         # Handle fatal SQL error
         if df is None:
@@ -186,6 +303,12 @@ class AnalyticsAgent:
                 summary=f"Sorry, I couldn't retrieve data for your question. Error: {state.get('error', 'Unknown')}",
                 chart_figure=None,
                 tables_used=state.get("relevant_tables", []),
+                warnings=warnings,
+                db_path=self.db_path,
+                query_analysis=state.get("query_analysis"),
+                schema_explanation=state.get("schema_explanation"),
+                sql_explanation=state.get("sql_explanation"),
+                kpi_explanations=state.get("kpi_explanations"),
             )
             return {"final_report": report}
 
@@ -218,11 +341,39 @@ class AnalyticsAgent:
                             result = execute_chart_code(chart_code, df, kpis)
                             if result["success"]:
                                 chart_fig = result["figure"]
+                                try:
+                                    if chart_fig is not None and getattr(chart_fig, "data", None):
+                                        x_title = ""
+                                        y_title = ""
+                                        if getattr(chart_fig, "layout", None):
+                                            if getattr(chart_fig.layout, "xaxis", None) and getattr(chart_fig.layout.xaxis, "title", None):
+                                                x_title = (chart_fig.layout.xaxis.title.text or "").lower()
+                                            if getattr(chart_fig.layout, "yaxis", None) and getattr(chart_fig.layout.yaxis, "title", None):
+                                                y_title = (chart_fig.layout.yaxis.title.text or "").lower()
+
+                                        if state["intent"] == "TREND":
+                                            date_cols = [
+                                                c for c in df.columns
+                                                if any(k in c.lower() for k in ["date", "day", "time", "start", "end"])
+                                            ]
+                                            if date_cols and not x_title:
+                                                warnings.append("Chart created but X-axis label is missing; expected a date-based axis for trend.")
+                                        if state["intent"] == "COMPARISON":
+                                            text_cols = [c for c in df.columns if df[c].dtype == "object"]
+                                            if text_cols and not x_title:
+                                                warnings.append("Chart created but X-axis label is missing; expected a grouping dimension for comparison.")
+                                        if not x_title or not y_title:
+                                            warnings.append("Chart created but axis labels are missing or unclear. Consider specifying the chart explicitly.")
+                                except Exception:
+                                    pass
                             else:
                                 chart_prompt += f"\n\nPREVIOUS CODE FAILED: {result['error']}\nFix it."
                         except Exception:
                             pass
                         retries += 1
+
+        if state.get("needs_chart") and chart_fig is None:
+            warnings.append("Chart requested but could not be generated. Try a more specific chart request or check the data returned.")
 
         # 5c: Assemble
         report = assemble_report(
@@ -234,6 +385,12 @@ class AnalyticsAgent:
             summary=summary,
             chart_figure=chart_fig,
             tables_used=state.get("relevant_tables", []),
+            warnings=warnings,
+            db_path=self.db_path,
+            query_analysis=state.get("query_analysis"),
+            schema_explanation=state.get("schema_explanation"),
+            sql_explanation=state.get("sql_explanation"),
+            kpi_explanations=state.get("kpi_explanations"),
         )
         return {"final_report": report}
 
@@ -256,6 +413,12 @@ class AnalyticsAgent:
             "report_summary": "",
             "final_report": {},
             "error": "",
+            # Initialize explainability fields
+            "query_analysis": {},
+            "schema_explanation": {},
+            "sql_explanation": {},
+            "kpi_explanations": {},
+            "table_scores": {}
         }
         result = self.graph.invoke(initial_state)
         return result["final_report"]

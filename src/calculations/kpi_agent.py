@@ -18,6 +18,7 @@ def calculate_kpis(df: pd.DataFrame, intent: str, query: str) -> dict:
     kpis = {}
     cols = [c.lower() for c in df.columns]
     df.columns = [c.lower() for c in df.columns]
+    warnings = []
 
     # ---- Handle pre-aggregated results (1-5 rows from GROUP BY / COUNT) ----
     if len(df) <= 5 and len(df.columns) <= 5:
@@ -138,11 +139,25 @@ def calculate_kpis(df: pd.DataFrame, intent: str, query: str) -> dict:
             kpis["comparison"] = grouped.to_dict()
             kpis["comparison_group"] = group_col
             kpis["comparison_metric"] = val_col
+        group_col = text_cols[0] if text_cols else None
+        if group_col and df[group_col].nunique() < 2:
+            warnings.append("Only one group found — cannot make a meaningful comparison")
 
     # ---- Trend intent ----
     if intent == "TREND":
         date_col = None
-        for c in ["shift_date", "date", "day", "start_time", "end_time"]:
+        for c in [
+            "shift_date",
+            "order_date",
+            "date",
+            "day",
+            "start_time",
+            "end_time",
+            "actual_start",
+            "actual_end",
+            "planned_start",
+            "planned_end",
+        ]:
             if c in cols:
                 date_col = c
                 break
@@ -152,7 +167,7 @@ def calculate_kpis(df: pd.DataFrame, intent: str, query: str) -> dict:
         if date_col and num_cols:
             val_col = "yield_pct" if "yield_pct" in df.columns else num_cols[0]
             try:
-                if date_col in ("start_time", "end_time"):
+                if date_col in ("start_time", "end_time", "actual_start", "actual_end", "planned_start", "planned_end"):
                     df["_date"] = pd.to_datetime(df[date_col], errors="coerce").dt.date.astype(str)
                     daily = df.groupby("_date")[val_col].mean().round(2)
                 else:
@@ -169,7 +184,15 @@ def calculate_kpis(df: pd.DataFrame, intent: str, query: str) -> dict:
             except Exception:
                 pass
 
+    if intent == "TREND" and len(df) < 5:
+        warnings.append(f"Only {len(df)} data points — trend may not be reliable")
+    if intent == "AGGREGATION" and len(df) == 1:
+        warnings.append("Single row result — aggregations based on one record")
+
     # ---- Row count ----
     kpis["row_count"] = len(df)
+
+    if warnings:
+        kpis["warning"] = " | ".join(warnings)
 
     return kpis

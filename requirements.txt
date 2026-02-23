@@ -5,6 +5,35 @@ langchain-core
 plotly
 pandas
 sqlalchemy
+pymilvus
+chromadb
+sentence-transformers
 scikit-learn
 requests
 python-dotenv
+sqlparse
+numpy
+
+
+
+cd "/Users/varaungandhi/Desktop/Vegam - me/project/ai-intime v2"
+
+mkdir -p Remove
+
+[ -f .env ] && mv .env Remove/
+
+[ -d .chromadb ] && mv .chromadb Remove/
+
+find . -name ".DS_Store" -not -path "./Remove/*" -exec mv {} Remove/ \; 2>/dev/null
+
+[ -d __MACOSX ] && mv __MACOSX Remove/
+
+find . -type d -name "__pycache__" -not -path "./Remove/*" -exec mv {} Remove/ \; 2>/dev/null
+
+mv data/*.db Remove/ 2>/dev/null
+
+[ -f Archive_new.zip ] && mv Archive_new.zip Remove/
+
+[ -f test_entities.py ] && mv test_entities.py Remove/
+
+echo "✅ Done! Files moved to Remove/"

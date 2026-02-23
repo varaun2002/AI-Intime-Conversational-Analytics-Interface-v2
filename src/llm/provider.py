@@ -16,7 +16,7 @@ class LLMProvider:
         
         if self.provider == "ollama":
             self.base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-            self.model = os.getenv("OLLAMA_MODEL", "llama3.2")
+            self.model = os.getenv("OLLAMA_MODEL", "deepseek-coder-v2")
         elif self.provider == "anthropic":
             self.api_key = os.getenv("ANTHROPIC_API_KEY")
             self.model = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-20250514")

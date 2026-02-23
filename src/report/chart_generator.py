@@ -25,6 +25,32 @@ RULES:
 
 def build_chart_prompt(query: str, intent: str, kpis: dict, df_info: str) -> str:
     """Build prompt for chart code generation."""
+    query_lower = (query or "").lower()
+    if "pie" in query_lower or "donut" in query_lower:
+        hint = "Create a DONUT CHART showing category shares." if "donut" in query_lower else "Create a PIE CHART showing category shares."
+        return f"""{hint}
+
+USER QUESTION: {query}
+
+KPIs: {kpis}
+
+DATAFRAME INFO:
+{df_info}
+
+Generate Plotly code. `df`, `kpis`, `go`, `pd`, `np` are available. Assign to `fig`."""
+
+    if "scatter" in query_lower:
+        return f"""Create a SCATTER PLOT showing the relationship between two numeric fields.
+
+USER QUESTION: {query}
+
+KPIs: {kpis}
+
+DATAFRAME INFO:
+{df_info}
+
+Generate Plotly code. `df`, `kpis`, `go`, `pd`, `np` are available. Assign to `fig`."""
+
     chart_hints = {
         "TREND": "Create a LINE CHART showing values over time. X-axis should be dates.",
         "COMPARISON": "Create a GROUPED BAR CHART comparing categories side by side.",
@@ -83,8 +109,99 @@ def auto_chart(df: pd.DataFrame, kpis: dict, intent: str, query: str) -> go.Figu
     df = df.copy()
     df.columns = [c.lower() for c in df.columns]
     fig = None
+    query_lower = (query or "").lower()
 
     try:
+        # ---- SCATTER: User explicitly asked for scatter ----
+        if "scatter" in query_lower:
+            x_col = None
+            y_col = None
+
+            if "quantity_planned" in df.columns and "quantity_actual" in df.columns:
+                x_col = "quantity_planned"
+                y_col = "quantity_actual"
+            else:
+                num_cols = [c for c in df.columns if df[c].dtype in ["float64", "int64", "float32"] and "id" not in c]
+                if len(num_cols) >= 2:
+                    x_col, y_col = num_cols[0], num_cols[1]
+
+            if x_col and y_col:
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(
+                    x=df[x_col],
+                    y=df[y_col],
+                    mode="markers",
+                    marker=dict(size=8, opacity=0.7),
+                    name=f"{y_col} vs {x_col}",
+                ))
+                fig.update_layout(
+                    title=f"{y_col.replace('_', ' ').title()} vs {x_col.replace('_', ' ').title()}",
+                    xaxis_title=x_col.replace("_", " ").title(),
+                    yaxis_title=y_col.replace("_", " ").title(),
+                    template="plotly_dark",
+                )
+                return fig
+
+        # ---- PIE/DONUT: User explicitly asked for pie ----
+        if "pie" in query_lower or "donut" in query_lower:
+            donut = "donut" in query_lower
+            categories = None
+            values = None
+            metric = None
+
+            if "comparison" in kpis:
+                categories = list(kpis["comparison"].keys())
+                values = list(kpis["comparison"].values())
+                metric = kpis.get("comparison_metric", "value")
+            elif "yield_by_line" in kpis:
+                categories = list(kpis["yield_by_line"].keys())
+                values = list(kpis["yield_by_line"].values())
+                metric = "yield"
+            elif "yield_by_supervisor" in kpis:
+                categories = list(kpis["yield_by_supervisor"].keys())
+                values = list(kpis["yield_by_supervisor"].values())
+                metric = "yield"
+            elif "output_by_product_name" in kpis:
+                categories = list(kpis["output_by_product_name"].keys())
+                values = list(kpis["output_by_product_name"].values())
+                metric = "output"
+
+            if categories and values:
+                fig = go.Figure(data=[go.Pie(
+                    labels=categories,
+                    values=values,
+                    hole=0.4 if donut else 0.0,
+                    textinfo="label+percent",
+                )])
+                title_metric = metric.replace("_", " ").title() if metric else "Value"
+                fig.update_layout(
+                    title=f"Share by Category ({title_metric})",
+                    template="plotly_dark",
+                )
+                return fig
+
+            text_cols = [c for c in df.columns if df[c].dtype == "object"]
+            num_cols = [c for c in df.columns if df[c].dtype in ["float64", "int64"] and "id" not in c]
+            if text_cols and num_cols:
+                x_col = text_cols[0]
+                y_col = num_cols[0]
+                series = df.groupby(x_col)[y_col].sum().sort_values(ascending=False)
+                if len(series) > 10:
+                    top = series.head(9)
+                    other = series.iloc[9:].sum()
+                    series = pd.concat([top, pd.Series({"Other": other})])
+                fig = go.Figure(data=[go.Pie(
+                    labels=series.index.tolist(),
+                    values=series.values.tolist(),
+                    hole=0.4 if donut else 0.0,
+                    textinfo="label+percent",
+                )])
+                fig.update_layout(
+                    title=f"Share by {x_col.replace('_', ' ').title()}",
+                    template="plotly_dark",
+                )
+                return fig
+
         # ---- TREND: Line chart over time ----
         if intent == "TREND" and "trend_data" in kpis:
             dates = list(kpis["trend_data"].keys())
