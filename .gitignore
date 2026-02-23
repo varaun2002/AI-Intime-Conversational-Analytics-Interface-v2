@@ -64,3 +64,4 @@ remove/
 __MACOSX/
 *.zip
 test_entities.py
+.claude/
